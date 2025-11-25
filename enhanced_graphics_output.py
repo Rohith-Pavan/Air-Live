@@ -105,6 +105,7 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         # Memory management
         self._frame_count = 0
         self._memory_cleanup_interval = 100  # Cleanup every 100 frames
+        self._offscreen: Optional[QImage] = None
         
         # Text overlay properties
         self._text_props: Dict[str, Any] = {
@@ -479,9 +480,15 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         # Get the target render size - this is CRITICAL for preventing pixelation
         render_size = self._get_effective_render_size()
         
-        # Create high-quality output image
-        output = QImage(render_size, QImage.Format.Format_ARGB32_Premultiplied)
-        output.fill(QColor(0, 0, 0, 255))  # Black background
+        # Create or reuse high-quality offscreen output image
+        if (
+            self._offscreen is None
+            or self._offscreen.size() != render_size
+            or self._offscreen.format() != QImage.Format.Format_ARGB32_Premultiplied
+        ):
+            self._offscreen = QImage(render_size, QImage.Format.Format_ARGB32_Premultiplied)
+        output = self._offscreen
+        output.fill(QColor(0, 0, 0, 255))
         
         painter = QPainter(output)
         try:
