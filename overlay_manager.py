@@ -115,45 +115,52 @@ class EffectManager:
         if overlay_canvas is None or overlay_canvas.isNull():
             return None
         w, h = size.width(), size.height()
-        mask = QImage(size, QImage.Format.Format_ARGB32)
-        mask.fill(QColor(0, 0, 0, 0))
-        # Build mask by scanning overlay alpha (transparent region -> opening)
+        # Downscale analysis to reduce per-pixel cost
+        analysis_w = min(640, max(64, w // 2))
+        analysis_h = max(1, int(h * (analysis_w / max(1, w))))
+        small = overlay_canvas.scaled(analysis_w, analysis_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+        small = small.convertToFormat(QImage.Format.Format_ARGB32)
+
+        # First pass: determine mode (transparent alpha vs bright area)
         alpha_thresh = 10
-        # Also support bright-low-sat fallback if transparency not found much
         transparent_pixels = 0
-        bright_pixels = 0
-        open_pixels = 0
-        for y in range(h):
-            for x in range(w):
-                c = overlay_canvas.pixelColor(x, y)
-                if c.alpha() < alpha_thresh:
+        for yy in range(small.height()):
+            for xx in range(small.width()):
+                if small.pixelColor(xx, yy).alpha() < alpha_thresh:
                     transparent_pixels += 1
-        # If very few transparent pixels, use bright fallback
-        use_bright = transparent_pixels < (w * h * 0.02)
+        use_bright = transparent_pixels < (small.width() * small.height() * 0.02)
+
+        # Build small binary mask
+        mask_small = QImage(small.size(), QImage.Format.Format_Alpha8)
+        mask_small.fill(0)
+        open_pixels = 0
+        for yy in range(small.height()):
+            for xx in range(small.width()):
+                c = small.pixelColor(xx, yy)
+                open_here = (c.alpha() < alpha_thresh) if not use_bright else (
+                    (max(c.red(), c.green(), c.blue()) - min(c.red(), c.green(), c.blue()) <= 20) and
+                    (max(c.red(), c.green(), c.blue()) >= 230) and c.alpha() > 200
+                )
+                if open_here:
+                    mask_small.setPixel(xx, yy, 255)
+                    open_pixels += 1
+
+        if open_pixels < max(50, int(mask_small.width() * mask_small.height() * 0.005)):
+            self._mask_cache[key] = QImage()
+            return None
+
+        # Scale mask up to target size with smooth interpolation and threshold to crisp alpha
+        mask_up = mask_small.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        final_mask = QImage(size, QImage.Format.Format_ARGB32)
+        final_mask.fill(QColor(0, 0, 0, 0))
         for y in range(h):
             for x in range(w):
-                c = overlay_canvas.pixelColor(x, y)
-                open_here = False
-                if not use_bright:
-                    open_here = (c.alpha() < alpha_thresh)
-                else:
-                    maxc = max(c.red(), c.green(), c.blue())
-                    minc = min(c.red(), c.green(), c.blue())
-                    if (maxc - minc) <= 20 and maxc >= 230 and c.alpha() > 200:
-                        open_here = True
-                        bright_pixels += 1
-                if open_here:
-                    # Set white opaque pixel in mask
-                    mask.setPixelColor(x, y, QColor(255, 255, 255, 255))
-                    open_pixels += 1
-        # Fallback: if the opening mask is effectively empty, skip masking (show full video)
-        total = max(1, w * h)
-        if open_pixels < max(100, int(total * 0.005)):
-            # Treat as no valid opening detected
-            self._mask_cache[key] = QImage()  # store a null placeholder to avoid repeated work
-            return None
-        self._mask_cache[key] = mask
-        return mask
+                a = mask_up.pixelColor(x, y).red()  # grayscale
+                if a >= 128:
+                    final_mask.setPixelColor(x, y, QColor(255, 255, 255, 255))
+
+        self._mask_cache[key] = final_mask
+        return final_mask
 
     def _detect_opening_norm(self, img: QImage) -> Optional[Tuple[float, float, float, float]]:
         """Detect the frame 'hole' by scanning alpha on a downscaled copy.
